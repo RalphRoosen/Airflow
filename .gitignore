@@ -1,0 +1,53 @@
+# =====================================================================
+# Airflow / Docker Project .gitignore
+# =====================================================================
+
+# Airflow runtime & metadata
+logs/
+airflow.db
+*.pid
+*.sqlite
+
+# Data dumps / exports / imports
+data/
+*.csv
+*.xlsx
+*.parquet
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Python caches & compiled files
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Secrets / environment
+.env
+.env.*
+
+# Node / JS (indien ooit gebruikt in project)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# IDE configs
+.vscode/
+.idea/
+*.iml
+
+# Misc build / temp
+*.log
+*.bak
+
+# Backups & test DAGs
+dags_backup/
+dags/mailbox_readv2.py
+dags/azure/
