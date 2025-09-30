@@ -1,0 +1,203 @@
+# Airflow 2.5.3 – CeleryExecutor met Redis & Postgres
+# Logs via named volume (airflow-logs). Init gebeurt via init.sh in dezelfde map.
+
+x-airflow-common: &airflow-common
+  build: .
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    SQLALCHEMY_WARN_20: "0"
+    SQLALCHEMY_SILENCE_UBER_WARNING: "1"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ""   # (optioneel) zet hier een key als je encryptie wilt
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+    PYTHONDONTWRITEBYTECODE: "1"
+    AIRFLOW__CORE__DAG_IGNORE_FILE_SYNTAX: regexp
+    AIRFLOW__CORE__DAG_IGNORE_FILE: '(^|/)(__pycache__|.*\.pyc|.*\.zip|.*\.whl|.*\.egg|.*\.jar)$'
+    AIRFLOW__CORE__STORE_SERIALIZED_DAGS: "True"
+    AIRFLOW__CORE__STORE_DAG_CODE: "True"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    _PIP_ADDITIONAL_REQUIREMENTS: "${_PIP_ADDITIONAL_REQUIREMENTS:-}"
+    # ==> Standaard 50000
+    AIRFLOW_UID: "${AIRFLOW_UID:-50000}"
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+  # ==> Draai runtime containers als airflow-user (uid:gid 50000:0 standaard)
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  redis:
+    image: redis:latest
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "5080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      AIRFLOW__SCHEDULER__USE_WATCHDOG: "False"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    environment:
+      <<: *airflow-common-env
+      AIRFLOW__SCHEDULER__USE_WATCHDOG: "False"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    restart: "no"
+    entrypoint: /bin/bash
+    command: ["-lc", "/opt/airflow/init.sh"]
+    # Init draait als root om permissies te kunnen zetten
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+      - ./init.sh:/opt/airflow/init.sh:ro
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles: ["debug"]
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command: ["bash", "-lc", "airflow"]
+
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    profiles: ["flower"]
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
+  airflow-logs:
+
+

@@ -1,0 +1,32 @@
+
+Testen dag op shell
+
+1: docker ps
+2: container id van webserver pakken
+3: docker exec -it 94c6abdd87d4 /bin/bash
+
+in de active shell van docker webserver:
+airflow tasks test <DAGID> <TAKSID> 2020-01-01
+
+
+
+
+
+Blijft herstarten?: Check AIRFLOW_UID=50000
+
+
+
+versies pip:
+$ pip install yolk3k
+$ yolk -V django
+Django 1.3
+Django 1.2.5
+Django 1.2.4
+Django 1.2.3
+Django 1.2.2
+Django 1.2.1
+Django 1.2
+Django 1.1.4
+Django 1.1.3
+Django 1.1.2
+Django 1.0.4

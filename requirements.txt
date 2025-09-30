@@ -1,0 +1,17 @@
+# ── Airflow providers die je DAGs gebruiken ──
+apache-airflow-providers-postgres
+apache-airflow-providers-http
+
+# ── Python libs die je importeert ──
+requests
+simplejson==3.13.2
+openpyxl==3.1.2
+msal==1.21.0
+pyodbc==4.0.35
+exchangelib==4.8.0
+tabulate
+
+# Voor execute_values etc.
+psycopg2-binary
+
+
