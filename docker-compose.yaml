@@ -150,22 +150,31 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # ---------------------------------------------------------------
+  # Triggerer (alleen nodig voor deferrable operators/sensors)
+  # Staat standaard UIT via profiles. Start alleen met:
+  #   docker compose --profile deferrable up -d
+  #
+  # Opmerking:
+  # - Bij Airflow 2.5.3 kun je al deferrables gebruiken, maar alleen
+  #   als je ze daadwerkelijk inzet in je DAGS heb je de triggerer nodig.
+  # - Laat dit profiel uit zolang je geen deferrables gebruikt.
+  # ---------------------------------------------------------------
+
   airflow-triggerer:
     <<: *airflow-common
     command: triggerer
+    profiles: ["deferrable"]     # <- standaard uit; alleen aan met dit profiel
     env_file:
       - .env
     environment:
       <<: *airflow-common-env
-      PYTHONASYNCIODEBUG: "1"                 # asyncio debug toont ‘overrunning coroutines’
-      AIRFLOW__LOGGING__LOGGING_LEVEL: "DEBUG"
-      AIRFLOW__TRIGGERER__DEFAULT_CAPACITY: "200"  # minder gelijktijdige triggers (voorkomt blocking)
     healthcheck:
       test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
-      retries: 10
-      start_period: 180s
+      retries: 5
+      start_period: 30s
     restart: always
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
