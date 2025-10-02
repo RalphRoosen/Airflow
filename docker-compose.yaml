@@ -73,14 +73,19 @@ services:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 180s
     restart: always
     env_file:
       - .env
     environment:
       <<: *airflow-common-env
       AIRFLOW__SCHEDULER__USE_WATCHDOG: "False"
+
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
+      AIRFLOW__WEBSERVER__WORKERS: "1"          # begin laag
+      AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "300"
+      AIRFLOW__WEBSERVER__EXPOSE_HEALTH_CHECK: "True"
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
       - airflow-logs:/opt/airflow/logs
@@ -97,14 +102,19 @@ services:
       test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 20
+      start_period: 300s
     restart: always
     env_file:
       - .env
     environment:
       <<: *airflow-common-env
       AIRFLOW__SCHEDULER__USE_WATCHDOG: "False"
+      # Scheduler heartbeat/health toleranter
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: "5"
+      AIRFLOW__SCHEDULER__HEALTH_CHECK_THRESHOLD: "120"
+      # Belangrijk: DAG parser (file processor) meer tijd geven
+      AIRFLOW__SCHEDULER__FILE_PROCESSOR_TIMEOUT: "300"     # default is ~50s; jij tikt 'm aan
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
       - airflow-logs:/opt/airflow/logs
@@ -125,8 +135,8 @@ services:
         - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 180s
     environment:
       <<: *airflow-common-env
       DUMB_INIT_SETSID: "0"
@@ -145,12 +155,17 @@ services:
     command: triggerer
     env_file:
       - .env
+    environment:
+      <<: *airflow-common-env
+      PYTHONASYNCIODEBUG: "1"                 # asyncio debug toont ‘overrunning coroutines’
+      AIRFLOW__LOGGING__LOGGING_LEVEL: "DEBUG"
+      AIRFLOW__TRIGGERER__DEFAULT_CAPACITY: "200"  # minder gelijktijdige triggers (voorkomt blocking)
     healthcheck:
       test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 180s
     restart: always
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
