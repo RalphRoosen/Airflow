@@ -76,6 +76,8 @@ services:
       retries: 5
       start_period: 30s
     restart: always
+    env_file:
+      - .env
     environment:
       <<: *airflow-common-env
       AIRFLOW__SCHEDULER__USE_WATCHDOG: "False"
@@ -98,6 +100,8 @@ services:
       retries: 5
       start_period: 30s
     restart: always
+    env_file:
+      - .env
     environment:
       <<: *airflow-common-env
       AIRFLOW__SCHEDULER__USE_WATCHDOG: "False"
@@ -119,6 +123,8 @@ services:
         - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
       interval: 30s
       timeout: 10s
+      env_file:
+      - .env
       retries: 5
       start_period: 30s
     environment:
