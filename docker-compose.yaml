@@ -132,9 +132,9 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" -t 15 | grep -q "\"status\": \"pong\""'
       interval: 30s
-      timeout: 10s
+      timeout: 20s
       retries: 10
       start_period: 180s
     environment:
@@ -149,6 +149,7 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+
 
   # ---------------------------------------------------------------
   # Triggerer (alleen nodig voor deferrable operators/sensors)
