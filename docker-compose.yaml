@@ -132,11 +132,14 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" -t 15 | grep -q "\"status\": \"pong\""'
+        - >
+          celery --app airflow.executors.celery_executor.app inspect ping
+          -d "celery@$${HOSTNAME}" -t 15 --json |
+          grep -Eq '"ok":[[:space:]]*"pong"'
       interval: 30s
       timeout: 20s
       retries: 10
-      start_period: 180s
+      start_period: 60s
     environment:
       <<: *airflow-common-env
       DUMB_INIT_SETSID: "0"
