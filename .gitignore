@@ -46,8 +46,3 @@ yarn-error.log
 # Misc build / temp
 *.log
 *.bak
-
-# Backups & test DAGs
-dags_backup/
-dags/mailbox_readv2.py
-dags/azure/
