@@ -9,6 +9,21 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from datetime import datetime
 from OIV.dwh_geo_sync_wegmoffelen import load_batches, WHERE_CLAUSE, DEFAULT_START, DST_CONN_ID
 
+"""
+De tabellen buurten_categorien (van CARE dekkingsplan) en cbs_buurten hebben enkele handmatige aanpassingen gehad
+Buurt Euverem, Pesaken, Billinghuizen en Waterop kwam textueel niet overeen en daarom aangepast
+
+De combinatie buurt, gemeente levert enkele niet unieke waarden op
+Verspreide huizen Gulpen-Wittem
+Verspreide huizen Eijsden-Margraten
+Hommert (gedeeltelijk) Beekdaelen
+Verspreide huizen Beekdaelen
+Verspreide huizen Meerssen
+
+Daarom handmatig aangepast (zie sql onderaan): 
+Verspreide huizen Gulpen-Wittem 1, Verspreide huizen Gulpen-Wittem 2, Verspreide huizen Gulpen-Wittem 3, etc
+"""
+
 SELECT_SQL = """SELECT
             i.lms_incident_id as incident_id,
             a.incidentadres,
@@ -57,12 +72,15 @@ def update_buurt():
     with dst.get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             UPDATE datawarehouse.incidenten_locatie AS p
-            SET buurt = b.buurtnaam
+            SET 
+                buurt    = b.buurtnaam,
+                gemeente = b.gemeentenaam
             FROM externe_bronnen.cbs_buurten AS b
             WHERE p.buurt IS NULL
-              AND p.geom IS NOT NULL
-              AND p.geom && b.geom
-              AND ST_Within(p.geom, b.geom) --intersect
+            AND p.gemeente IS NULL
+            AND p.geom IS NOT NULL
+            AND p.geom && b.geom            -- bbox filter (sneller)
+            AND ST_Intersects(p.geom, b.geom);
         """)
         conn.commit()
 
@@ -95,3 +113,39 @@ with DAG(
     )
 
     transfer_task >> update_buurt_task
+
+
+"""
+BEGIN;
+
+-- A1) cbs_buurten → hernoem dubbelen
+WITH d AS (
+  SELECT ctid AS rowid, buurtnaam, gemeentenaam,
+         ROW_NUMBER() OVER (PARTITION BY gemeentenaam, buurtnaam ORDER BY ctid) AS rn,
+         COUNT(*) OVER (PARTITION BY gemeentenaam, buurtnaam) AS cnt
+  FROM externe_bronnen.cbs_buurten
+  WHERE buurtnaam IN ('Verspreide huizen', 'Hommert (gedeeltelijk)')
+)
+UPDATE externe_bronnen.cbs_buurten cb
+SET buurtnaam = CONCAT(d.buurtnaam, ' ', d.gemeentenaam, ' ', d.rn)
+FROM d
+WHERE cb.ctid = d.rowid
+  AND d.cnt > 1;
+
+-- A2) buurten_categorieen → hernoem dubbelen
+WITH d AS (
+  SELECT ctid AS rowid, bu_naam, gm_naam,
+         ROW_NUMBER() OVER (PARTITION BY gm_naam, bu_naam ORDER BY ctid) AS rn,
+         COUNT(*) OVER (PARTITION BY gm_naam, bu_naam) AS cnt
+  FROM externe_bronnen.buurten_categorieen
+  WHERE bu_naam IN ('Verspreide huizen', 'Hommert (gedeeltelijk)')
+)
+UPDATE externe_bronnen.buurten_categorieen bc
+SET bu_naam = CONCAT(d.bu_naam, ' ', d.gm_naam, ' ', d.rn)
+FROM d
+WHERE bc.ctid = d.rowid
+  AND d.cnt > 1;
+
+COMMIT;
+
+"""
