@@ -2041,9 +2041,10 @@ def _calcGripFromKladblok():
 with DAG(
     dag_id='lmsvdb_incidenten_ARC_zonderobcd',
     doc_md=doc_md,
-    schedule_interval='0 */2 * * *',
+    schedule_interval='0 */3 * * *',
     start_date=datetime(2023, 1, 1),
     max_active_runs=1,
+    dagrun_timeout=timedelta(minutes=140),
     concurrency=1,
     catchup=False
 ) as dag:
@@ -2156,6 +2157,7 @@ with DAG(
     schedule_interval='@weekly',
     start_date=datetime(2023, 1, 1),
     max_active_runs=1,
+    dagrun_timeout=timedelta(minutes=140),
     concurrency=1,
     catchup=False
 ) as dag:
