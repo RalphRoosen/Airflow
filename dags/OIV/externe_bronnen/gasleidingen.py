@@ -1,73 +1,65 @@
-# dags/enexis_gasleidingen.py
 # -*- coding: utf-8 -*-
-import json, requests, re
+import json, re
 from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from psycopg2.extras import execute_values
+
+from common.wfs_utils import (
+    _num, _bool, iter_wfs_batches, flush_values, build_cql_intersects, wfs_hits
+)
 
 # ─────────────────────────────────────────────────────────────────────
-# HARD-CODED KEUZE: laad 'all', alleen 'leiding', of alleen 'service_leiding'
-SELECT_LAYER = "service_leiding"  # opties: "all" | "leiding" | "service_leiding"
+# Instellingen
 # ─────────────────────────────────────────────────────────────────────
-
+SELECT_LAYER = "all"  # opties: "all" | "leiding" | "service_leiding"
 POSTGRES_CONN_ID = "geoserver"
 
-BBOX_SQL = """
-WITH e AS (
-  SELECT ST_Extent(geom) AS b
-  FROM externe_bronnen.vrzl
-  WHERE naam = 'vrzl'
-)
-SELECT ST_XMin(b), ST_YMin(b), ST_XMax(b), ST_YMax(b) FROM e;
+# Haal exact de polygo(o)n(en) op met naam = 'vrzl' (en simplificeer WKT iets voor kortere CQL)
+POLYGONEN_SQL = """
+SELECT
+  fid::text AS poly_id,
+  ST_AsText(ST_SimplifyPreserveTopology(geom, 2.0)) AS wkt,  -- ≈ 2 meter tolerantie
+  ST_XMin(ST_Extent(geom)) AS xmin,
+  ST_YMin(ST_Extent(geom)) AS ymin,
+  ST_XMax(ST_Extent(geom)) AS xmax,
+  ST_YMax(ST_Extent(geom)) AS ymax
+FROM externe_bronnen.polygonen_van_grenzen
+WHERE naam = 'vrzl' AND geom IS NOT NULL
+GROUP BY fid, geom;
 """
 
 WFS_URL       = "https://opendata.enexis.nl/geoserver/wfs"
 WFS_SRS       = "EPSG:28992"
-WFS_PAGE_SIZE = 5000  # 2.0.0: pagina-grootte; 1.1.0: maxFeatures
+WFS_PAGE_SIZE = 10000
 
-# ─────────────────────────────────────────────────────────────────────
-# Laagconfiguratie per dataset
-# Opmerking bij service_leiding:
-#   De Enexis-GeoServer retourneert bij WFS 2.0.0 + paging een 400:
-#   "Cannot do natural order without a primary key..."
-#   Dit is een bekende beperking: WFS 2.0.0 paging vereist een stabiele PK/sortering.
-#   Daarom forceren we voor service_leiding WFS 1.1.0 (zonder paging).
-# ─────────────────────────────────────────────────────────────────────
+DEFAULT_GEOM_ATTR = "geom"
+
 LAYERS = {
     "leiding": {
         "typename":      "Enexis_Opendata:asm_g_leiding",
         "target":        "externe_bronnen.enexis_gasleiding",
-        "force_version": "2.0.0",  # werkt goed met paging
+        "force_version": "2.0.0",
+        "max_start_index": None, # Enexis heeft geen limiet zoals pdok
     },
     "service_leiding": {
         "typename":      "Enexis_Opendata:asm_g_service_leiding",
         "target":        "externe_bronnen.enexis_gasleiding_service",
-        "force_version": "1.1.0",  # NIET compatibel met 2.0.0 paging → forceer 1.1.0
+        "force_version": "1.1.0",   # De service-laag heeft issues met natural order; 1.1.0 vermijdt paging
+        "max_start_index": None,   # wordt genegeerd bij 1.1.0
     },
 }
 
-# ---------- helpers ----------
-def _num(v):
-    if v in (None, "", "null"): return None
-    try: return float(v)
-    except Exception: return None
-
-def _bool(v):
-    if v is None: return None
-    if isinstance(v, bool): return v
-    s = str(v).strip().lower()
-    if s in ("true","t","1","yes","y","ja"): return True
-    if s in ("false","f","0","no","n","nee"): return False
-    return None
+# ─────────────────────────────────────────────────────────────────────
+# Domeinspecifieke helpers
+# ─────────────────────────────────────────────────────────────────────
 
 def _warmteafstand(pressure_bar, diameter_mm):
     p = _num(pressure_bar)
     d = _num(diameter_mm)
     if p is None or d is None:
         return None
-
     if p <= 0.1:
         row = ["10","15","25","35","50","70",">90"]
     elif p <= 1:
@@ -86,7 +78,6 @@ def _warmteafstand(pressure_bar, diameter_mm):
     elif d <= 300: idx = 4
     elif d <= 400: idx = 5
     else: idx = 6
-
     return row[idx]
 
 def _warmteafstand_to_int(wtxt):
@@ -106,68 +97,47 @@ def _warmteafstand_to_int(wtxt):
     digits = re.sub(r"[^\d]", "", s)
     return int(digits) if digits else None
 
-def _show_response_prefix(resp, maxlen=500):
-    try:
-        ct = resp.headers.get("content-type", "")
-        snippet = resp.text[:maxlen]
-        print(f"[DEBUG] content-type={ct}")
-        print(f"[DEBUG] body prefix:\n{snippet}")
-    except Exception as e:
-        print(f"[DEBUG] cannot print response body: {e!r}")
+# ─────────────────────────────────────────────────────────────────────
+# Data access
+# ─────────────────────────────────────────────────────────────────────
 
-# ---------- data access ----------
-def get_bbox(**_):
+def get_polygonen(**_):
     pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-    xmin, ymin, xmax, ymax = pg.get_first(BBOX_SQL)
-    if None in (xmin, ymin, xmax, ymax):
-        raise ValueError("BBOX_SQL gaf NULL terug.")
-    return {"xmin": float(xmin), "ymin": float(ymin), "xmax": float(xmax), "ymax": float(ymax)}
+    rows = []
+    with pg.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(POLYGONEN_SQL)
+        for poly_id, wkt, xmin, ymin, xmax, ymax in cur.fetchall():
+            rows.append({
+                "poly_id": poly_id,
+                "wkt": wkt,
+                "bbox": {
+                    "xmin": float(xmin), "ymin": float(ymin),
+                    "xmax": float(xmax), "ymax": float(ymax)
+                },
+            })
+    if not rows:
+        raise ValueError("Geen polygonen gevonden met naam='vrzl'.")
+    return rows
 
-def fetch_page(typename: str, bbox: dict, start_index: int, count: int, version: str):
-    """
-    Haal features op met de juiste parameters per WFS-versie.
-    - 2.0.0: typeNames + count + startIndex (paging)
-    - 1.1.0: typeName + maxFeatures (geen paging)
-    Retourneert (json, version_used)
-    """
-    if version == "2.0.0":
-        params = {
-            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
-            "typeNames": typename, "srsName": WFS_SRS, "outputFormat": "application/json",
-            "bbox": f"{bbox['xmin']},{bbox['ymin']},{bbox['xmax']},{bbox['ymax']},{WFS_SRS}",
-            "startIndex": start_index, "count": count,
-        }
-    else:  # 1.1.0
-        params = {
-            "service": "WFS", "version": "1.1.0", "request": "GetFeature",
-            "typeName": typename, "srsName": WFS_SRS, "outputFormat": "application/json",
-            "bbox": f"{bbox['xmin']},{bbox['ymin']},{bbox['xmax']},{bbox['ymax']},{WFS_SRS}",
-            "maxFeatures": count,
-        }
+def _flush(pg, sql, template, rows):
+    flush_values(pg, sql, template, rows)
 
-    r = requests.get(WFS_URL, params=params, timeout=180)
-    if r.status_code != 200:
-        print(f"[ERROR] WFS {version} HTTP {r.status_code} for URL: {r.url}")
-        _show_response_prefix(r)
-        r.raise_for_status()
-    return r.json(), version
+# ─────────────────────────────────────────────────────────────────────
+# Loader
+# ─────────────────────────────────────────────────────────────────────
 
-def _flush(pg: PostgresHook, sql: str, template: str, rows):
-    conn = pg.get_conn()
-    with conn, conn.cursor() as cur:
-        execute_values(cur, sql, rows, template=template)
-
-def load_layer(cfg: dict, bbox: dict):
-    """
-    Laadt één layer in batches naar de doeltabel.
-    - Voor 2.0.0: pagina's ophalen met startIndex/count.
-    - Voor 1.1.0: één batch (geen paging).
-    """
+def load_layer_for_polygon(cfg, poly):
     typename = cfg["typename"]
     target   = cfg["target"]
     version  = cfg.get("force_version", "2.0.0")
 
-    print(f"[INFO] Start load: {typename} → {target} (WFS {version})")
+    poly_id = poly["poly_id"]
+    wkt     = poly["wkt"]
+
+    # Maak CQL met een 'initiele' attribuutnaam; utils corrigeren dit automatisch bij 400 "Illegal property name"
+    cql = build_cql_intersects(DEFAULT_GEOM_ATTR, wkt, srs=WFS_SRS)
+    print(f"[INFO] Start load {typename} met CQL voor poly_id={poly_id}")
+    print(f"[DEBUG] CQL INIT: {cql[:240]}{'...' if len(cql)>240 else ''}")
 
     pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
 
@@ -206,24 +176,35 @@ def load_layer(cfg: dict, bbox: dict):
     """
 
     template = "(" + ",".join([
-        "%s", "%s", "%s", "%s", "%s", "%s",
-        "%s", "%s", "%s", "%s", "%s",
-        "%s", "%s", "%s", "%s", "%s",
-        "%s", "%s", "%s", "%s",
+        "%s","%s","%s","%s","%s","%s",
+        "%s","%s","%s","%s","%s",
+        "%s","%s","%s","%s","%s",
+        "%s","%s","%s","%s",
         "%s",
         "ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)",
         "%s"
     ]) + ")"
 
-    start = 0
     total = 0
     batch = []
 
-    while True:
-        data, ver = fetch_page(typename, bbox, start, WFS_PAGE_SIZE, version)
-        feats = data.get("features", [])
+    total_hits = wfs_hits(WFS_URL, typename, version, WFS_SRS, cql_filter=cql)
+    if total_hits is not None:
+        print(f"[INFO] Verwacht {total_hits} features voor {typename} (poly_id={poly_id})")
+
+    for feats in iter_wfs_batches(
+        base_url=WFS_URL,
+        typename=typename,
+        bbox=None,  # Enexis staat bbox + cql niet toe → bbox=None
+        version=version,
+        srs=WFS_SRS,
+        page_size=WFS_PAGE_SIZE,
+        output_format="application/json",
+        timeout=180,
+        extra_params={"cql_filter": cql},
+        max_start_index=cfg.get("max_start_index", None), 
+    ):
         if not feats:
-            print(f"[INFO] Geen features in deze batch (ver={ver}, startIndex={start}). Stop.")
             break
 
         for f in feats:
@@ -258,30 +239,46 @@ def load_layer(cfg: dict, bbox: dict):
                 json.dumps(f.get("geometry")),
                 json.dumps(p),
             ))
-
         total += len(feats)
 
         if len(batch) >= 10000:
             _flush(pg, insert_sql, template, batch); batch.clear()
 
-        # Paginatie alleen bij WFS 2.0.0
-        if ver == "2.0.0":
-            start += len(feats)
-            # Als minder dan page size terugkomt, is dit de laatste pagina
-            if len(feats) < WFS_PAGE_SIZE:
-                break
-        else:
-            # 1.1.0: geen paging, dus na één call stoppen
-            break
-
     if batch:
         _flush(pg, insert_sql, template, batch)
 
-    print(f"[INFO] Klaar: {typename} → {target}. Totaal features verwerkt: {total}")
+    print(f"[INFO] Klaar voor poly_id={poly_id}: {total} features.")
 
-# ---------- Airflow callable ----------
+# ─────────────────────────────────────────────────────────────────────
+# Airflow orchestration
+# ─────────────────────────────────────────────────────────────────────
+
+def clear_existing(**_):
+    # Bepaal welke tabellen geleegd moeten worden
+    if SELECT_LAYER == "leiding":
+        tables = [LAYERS["leiding"]["target"]]
+    elif SELECT_LAYER == "service_leiding":
+        tables = [LAYERS["service_leiding"]["target"]]
+    else:  # "all"
+        # Let op: volgorde kan uitmaken bij FK-relaties; begin met kind-tabellen
+        tables = [
+            LAYERS["service_leiding"]["target"],
+            LAYERS["leiding"]["target"],
+        ]
+
+    pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+    with pg.get_conn() as conn, conn.cursor() as cur:
+        for tbl in tables:
+            cur.execute(f"DELETE FROM {tbl};")
+            print(f"[INFO] Tabel geleegd: {tbl}")
+        conn.commit()
+    print(f"[INFO] Cleanup voltooid voor SELECT_LAYER='{SELECT_LAYER}'.")
+
 def run_selected_layers(**ctx):
-    bbox = ctx["ti"].xcom_pull(task_ids="get_bbox")
+    polygonen = ctx["ti"].xcom_pull(task_ids="get_polygonen")
+    if not polygonen:
+        print("[WARN] Geen polygonen om te verwerken.")
+        return
 
     if SELECT_LAYER == "leiding":
         layers_to_run = [LAYERS["leiding"]]
@@ -291,19 +288,21 @@ def run_selected_layers(**ctx):
         layers_to_run = [LAYERS["leiding"], LAYERS["service_leiding"]]
 
     for cfg in layers_to_run:
-        load_layer(cfg, bbox)
+        for poly in polygonen:
+            load_layer_for_polygon(cfg, poly)
 
-# ---- DAG ----
 default_args = {"owner": "data-engineering", "retries": 1, "retry_delay": timedelta(minutes=5)}
 
 with DAG(
     dag_id="enexis_gasleidingen",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule_interval=None,   # Airflow 2.x: 'schedule' kan ook
+    schedule_interval=None,  # Airflow 2: je kunt 'schedule' ook gebruiken
     catchup=False,
     tags=["wfs", "geoserver", "postgis", "enexis"],
 ) as dag:
-    t_bbox = PythonOperator(task_id="get_bbox", python_callable=get_bbox)
+    t_poly = PythonOperator(task_id="get_polygonen", python_callable=get_polygonen)
     t_load = PythonOperator(task_id="run_selected_layers", python_callable=run_selected_layers, provide_context=True)
-    t_bbox >> t_load
+    t_clear = PythonOperator(task_id="clear_existing", python_callable=clear_existing)
+
+    t_clear >> t_poly >> t_load
