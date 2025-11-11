@@ -2036,6 +2036,23 @@ def _calcGripFromKladblok():
             Variable.set(syncFromVarName, huidige_datum.strftime("%Y-%m-%d"))
             print(f"[calcGrip] sync pointer gezet op {huidige_datum}")
 
+def refresh_mv_incidenten_cbs_dekkingsplancategorie():
+    hook = PostgresHook(postgres_conn_id="dwh")
+
+    # met unieke index
+    #sql = " REFRESH MATERIALIZED VIEW CONCURRENTLY public.mview_incidenten_met_buurt_categorie_wijk; "
+
+    # zonder UNIQUE index
+    sql = "REFRESH MATERIALIZED VIEW public.mview_incidenten_met_buurt_categorie_wijk;"
+
+    conn = hook.get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute(sql)
+    conn.commit()
+
+    cursor.close()
+    conn.close()
 
 
 with DAG(
@@ -2139,14 +2156,17 @@ with DAG(
         python_callable = _getDekkingsplan
     )
 
-
+    refresh_mv_task = PythonOperator(
+        task_id="refresh_mv_incidenten",
+        python_callable=refresh_mv_incidenten_cbs_dekkingsplancategorie,
+    )
 
 
     begin = EmptyOperator(task_id="begin", trigger_rule="all_done")
     middle = EmptyOperator(task_id="middle", trigger_rule="all_done")
     end = EmptyOperator(task_id="end", trigger_rule="all_done")
     
-    begin >> testDBConnection >> syncIncidentData_ARC >> [collectMelding_ARC, collectKladblokRegels_ARC, collectKarakteristieken_ARC, collectInzetEenheid_ARC, collectStatusHist_ARC, getDekkingsplan] >> middle >> doAg5Sync >> calcOpkomsttijden >> end
+    begin >> testDBConnection >> syncIncidentData_ARC >> [collectMelding_ARC, collectKladblokRegels_ARC, collectKarakteristieken_ARC, collectInzetEenheid_ARC, collectStatusHist_ARC, getDekkingsplan] >> middle >> doAg5Sync >> calcOpkomsttijden >> refresh_mv_task >> end
     collectKladblokRegels_ARC >> calcGripFromKladblok >> calcBrandGrootte_Gaslek_dcu_fromKB
 
 
@@ -2225,11 +2245,16 @@ with DAG(
         python_callable = _doAg5Sync
     )
 
+    refresh_mv_task = PythonOperator(
+        task_id="refresh_mv_incidenten",
+        python_callable=refresh_mv_incidenten_cbs_dekkingsplancategorie,
+    )
+
     begin = EmptyOperator(task_id="begin", trigger_rule="all_done")
     middle = EmptyOperator(task_id="middle", trigger_rule="all_done")
     end = EmptyOperator(task_id="end", trigger_rule="all_done")
     
-    begin >> testDBConnection >> syncIncidentData_HST >> [collectMelding_HST, collectKladblokRegels_HST, collectKarakteristieken_HST, collectInzetEenheid_HST, collectStatusHist_HST] >> middle >> doAg5Sync >> end
+    begin >> testDBConnection >> syncIncidentData_HST >> [collectMelding_HST, collectKladblokRegels_HST, collectKarakteristieken_HST, collectInzetEenheid_HST, collectStatusHist_HST] >> middle >> doAg5Sync >> refresh_mv_task >> end
     collectKladblokRegels_HST >> calcGripFromKladblok >> calcBrandGrootte_Gaslek_dcu_fromKB
 
 
