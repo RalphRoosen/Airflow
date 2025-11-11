@@ -7,7 +7,7 @@ from airflow.providers.postgres.operators.postgres import PostgresOperator
 DAG_ID = "load_incidenten_cbs_buurt_wijk"
 CONN_ID = "dwh"
 
-SRC_INC_TABLE = "vdb.incidentcoordinaten_amersfoort_rdnew"  # heeft: incident_id, geom (28992)
+SRC_INC_TABLE = "vdb.incidenten_coordinaten_amersfoort_rdnew"  # heeft: incident_id, geom (28992)
 CBS_BUURTEN = "polygonen.cbs_buurten"                       # heeft: buurtcode, wijkcode, geom (28992)
 CBS_WIJKEN = "polygonen.cbs_wijken"                         # heeft: wijkcode, wijknaam, gemeentenaam (28992)
 TARGET_TABLE = "vdb.incidenten_cbs_buurt_wijk"              # doel: incident_id, buurt, wijk, gemeente
